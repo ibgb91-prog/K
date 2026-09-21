@@ -85,8 +85,8 @@ def predict():
         "Content-Type": "application/json"
     }
     
-    # استخدام الموديل النشط حالياً في Groq
-    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-specdec")
+    # استخدام الموديل الثابت والمستقر llama3-8b-8192
+    model_name = os.getenv("GROQ_MODEL", "llama3-8b-8192")
     
     body = {
         "model": model_name,
