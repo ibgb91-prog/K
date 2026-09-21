@@ -80,14 +80,13 @@ def predict():
     else:
         dynamic_context = f"\n\n[معلومات للموظف: المرسل شخص آخر رقمه {sender_phone}].خدمه باحترام واحترافية."
 
-    # استخدام الاتصال المباشر (REST API) لضمان عدم حدوث مشاكل في مكتبات بايثون
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    # جلب اسم النموذج من البيئة أو استخدام الافتراضي المضمون
-    model_name = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+    # استخدام الموديل النشط حالياً في Groq
+    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-specdec")
     
     body = {
         "model": model_name,
