@@ -2,12 +2,8 @@ import os
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
-from groq import Groq
+import requests
 from werkzeug.exceptions import HTTPException
-
-# ---------------------------------------------------------------------------
-# الإعدادات
-# ---------------------------------------------------------------------------
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -17,7 +13,7 @@ logger = logging.getLogger("laith")
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
-app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # حماية من الطلبات الضخمة
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 
 LAITH_SYSTEM_PROMPT = """
 أنت «ليث» (Laith)، مساعد وموظف ذكي وودود جداً، تتحدث باللهجة العراقية الطبيعية القريبة للقلب أو العربية الفصحى المبسطة حسب السياق.
@@ -84,20 +80,34 @@ def predict():
     else:
         dynamic_context = f"\n\n[معلومات للموظف: المرسل شخص آخر رقمه {sender_phone}].خدمه باحترام واحترافية."
 
+    # استخدام الاتصال المباشر (REST API) لضمان عدم حدوث مشاكل في مكتبات بايثون
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # جلب اسم النموذج من البيئة أو استخدام الافتراضي المضمون
+    model_name = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+    
+    body = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": LAITH_SYSTEM_PROMPT + dynamic_context},
+            {"role": "user", "content": user_message}
+        ],
+        "temperature": 0.55
+    }
+
     try:
-        # استخدام الموديل النشط والسريع llama-3.1-8b-instant
-        client = Groq(api_key=api_key)
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=body, timeout=30)
         
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": LAITH_SYSTEM_PROMPT + dynamic_context},
-                {"role": "user", "content": user_message}
-            ],
-            model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
-            temperature=0.55,
-        )
+        if response.status_code != 200:
+            logger.error(f"Groq API Error: {response.text}")
+            raise APIError(f"خطأ من مزود الذكاء الاصطناعي: {response.status_code}", 502, "ai_provider_error")
+            
+        res_json = response.json()
+        bot_reply = res_json["choices"][0]["message"]["content"].strip()
         
-        bot_reply = chat_completion.choices[0].message.content.strip()
         if not bot_reply:
             raise APIError("لم تُرجع خدمة الذكاء الاصطناعي إجابة.", 502, "empty_ai_response")
             
@@ -106,7 +116,7 @@ def predict():
     except APIError as ae:
         raise ae
     except Exception as exc:
-        logger.error("خطأ أثناء الاتصال بـ Groq: %s", str(exc))
+        logger.error("خطأ غير متوقع أثناء الاتصال: %s", str(exc))
         raise APIError("حدث خطأ أثناء التواصل مع نموذج الذكاء الاصطناعي.", 502, "ai_provider_error")
 
 @app.errorhandler(APIError)
