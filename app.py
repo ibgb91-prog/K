@@ -91,7 +91,7 @@ def predict():
         dynamic_context = f"\n\n[معلومات للموظف: المرسل شخص آخر رقمه {sender_phone}].خدمه باحترام واحترافية."
 
     try:
-        # استخدام عميل Groq الرسمي مع الموديل المحدث والمستقر
+        # استخدام عميل Groq الرسمي مع الموديل الجديد والنشط
         client = Groq(api_key=api_key)
         
         chat_completion = client.chat.completions.create(
@@ -99,7 +99,7 @@ def predict():
                 {"role": "system", "content": LAITH_SYSTEM_PROMPT + dynamic_context},
                 {"role": "user", "content": user_message}
             ],
-            model=os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile"),
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
             temperature=0.55,  # حرارة متوازنة ليكون الرد بشرياً وعفوياً
         )
         
