@@ -1,15 +1,15 @@
-"""خدمة الموظف الافتراضي الذكي «ليث» باستخدام Flask.
+"""خدمة الموظف الافتراضي الذكي «ليث» باستخدام Flask و Groq.
 
 التشغيل محلياً:
     pip install Flask
-    export OPENAI_API_KEY="your-api-key"
+    export GROQ_API_KEY="your-api-key"
     python app.py
 
 متغيرات البيئة الاختيارية:
     PORT=8080
-    OPENAI_API_KEY=...
-    OPENAI_BASE_URL=https://api.openai.com/v1
-    OPENAI_MODEL=gpt-4o-mini
+    GROQ_API_KEY=...
+    GROQ_BASE_URL=https://api.groq.com/openai/v1
+    GROQ_MODEL=llama-3.3-70b-versatile
     LLM_TIMEOUT=45
 """
 
@@ -141,17 +141,17 @@ def validate_predict_payload(payload: Any) -> str:
 
 
 def generate_laith_response(message: str) -> str:
-    """إرسال رسالة المستخدم إلى واجهة متوافقة مع OpenAI وإرجاع رد ليث."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    """إرسال رسالة المستخدم إلى واجهة Groq وإرجاع رد ليث."""
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
         raise APIError(
-            "خدمة ليث غير مهيأة بعد. يرجى ضبط متغير البيئة OPENAI_API_KEY.",
+            "خدمة ليث غير مهيأة بعد. يرجى ضبط متغير البيئة GROQ_API_KEY.",
             503,
             "ai_service_not_configured",
         )
 
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+    base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
     try:
         timeout = float(os.getenv("LLM_TIMEOUT", "45"))
@@ -186,7 +186,6 @@ def generate_laith_response(message: str) -> str:
         with urllib.request.urlopen(upstream_request, timeout=timeout) as upstream:
             result = json.loads(upstream.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        # نسجل رمز الحالة فقط لتجنب تسريب مفاتيح أو تفاصيل حساسة للمستخدم.
         logger.error("مزود الذكاء الاصطناعي أعاد HTTP %s", exc.code)
         if exc.code == 429:
             raise APIError(
