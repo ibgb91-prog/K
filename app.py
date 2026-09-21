@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime
 from flask import Flask, request, jsonify
 from groq import Groq
 from werkzeug.exceptions import HTTPException
@@ -19,19 +20,11 @@ app.config["JSON_AS_ASCII"] = False
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # حماية من الطلبات الضخمة
 
 LAITH_SYSTEM_PROMPT = """
-أنت «ليث» (Laith)، موظف افتراضي عربي ذكي وموثوق ومحترف.
-
-قواعد شخصيتك وأسلوبك:
-- أجب بوضوح وثقة ولباقة، وابدأ مباشرة في حل طلب المستخدم دون مقدمات زائدة.
-- استخدم العربية الفصحى الطبيعية ما لم يطلب المستخدم لغة أو لهجة أخرى.
-- قدّم إجابات عملية ومنظمة، واستخدم النقاط أو الخطوات عندما تحسن الفهم.
-- اسأل سؤالاً توضيحياً واحداً فقط عندما تكون معلومة أساسية ناقصة فعلاً.
-- لا تختلق معلومات أو نتائج أو مصادر. صرّح بعدم اليقين عند الحاجة.
-- احمِ خصوصية المستخدم، ولا تطلب بيانات حساسة إلا إذا كانت ضرورية بوضوح.
-- ارفض بأدب الطلبات الضارة أو غير القانونية، واقترح بديلاً آمناً.
-- لا تدّعِ أنك نفذت إجراءً خارج المحادثة ما لم تكن قد نفذته فعلاً.
-- اجعل الرد متناسباً مع السؤال: مختصراً للأسئلة البسيطة ومفصلاً للمهام المعقدة.
-- حافظ دائماً على هويتك باسم «ليث» عند سؤالك عن نفسك.
+أنت «ليث» (Laith)، مساعد وموظف ذكي وودود جداً، تتحدث باللهجة العراقية الطبيعية القريبة للقلب أو العربية الفصحى المبسطة حسب السياق.
+- أنت لست مجرد بوت آلي، بل كأنك إنسان حقيقي وشخص واعي ومقرب.
+- عندما تتحدث مع مديرك ومطوّرك (حسين، صاحب الرقم 07769942923)، عامله باحترام كبير ومحبة، وناده دائماً بـ "أستاذ" أو "حجي" أو "مديرنا"، واجعل ردك عليه فيه خدمة وتلبية فورية وبشكل مريح وغير معقد.
+- إذا راسلك شخص آخر غير المدير، تعامل معه بأدب واحترافية كخدمة عملاء.
+- لا تكرر نفس العبارات دائماً، كن عفوياً، ذكياً، ومباشراً في تلبية الطلب.
 """.strip()
 
 class APIError(Exception):
@@ -70,22 +63,44 @@ def predict():
     if not user_message:
         raise APIError('لا يمكن أن تكون قيمة "message" فارغة.', 400, "empty_message")
 
+    # استقبال رقم الهاتف أو المرسل إذا تم إرساله من n8n
+    sender_phone = str(payload.get("phone", payload.get("sender", "unknown"))).strip()
+
     # جلب مفتاح Groq
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
         raise APIError("خدمة ليث غير مهيأة بعد لعدم وجود مفتاح GROQ_API_KEY.", 503, "ai_service_not_configured")
 
+    # التحقق هل المرسل هو المدير (حسين)
+    is_admin = "07769942923" in sender_phone or sender_phone == "07769942923"
+
+    # تحديد وقت اليوم لإضافة لمسة بشرية دافئة
+    current_hour = datetime.now().hour
+    if 5 <= current_hour < 12:
+        time_greeting = "صباح الخير"
+    elif 12 <= current_hour < 17:
+        time_greeting = "ظهر الخير"
+    else:
+        time_greeting = "مساء الخير"
+
+    # تجهيز السياق الديناميكي بناءً على من يراسل
+    dynamic_context = ""
+    if is_admin:
+        dynamic_context = f"\n\n[معلومات خاصة بالموظف: الشخص الذي يراسلني الآن هو مديري ومطوّري (حسين) صاحب الرقم {sender_phone}. الوقت الحالي هو {time_greeting}. استقبله بترحاب عراقي دافئ وبكل احترام، وقل له مثلاً: 'هلا بيك أستاذ حسين، {time_greeting}، آمرني شتحتاج؟']."
+    else:
+        dynamic_context = f"\n\n[معلومات للموظف: المرسل شخص آخر رقمه {sender_phone}].خدمه باحترام واحترافية."
+
     try:
-        # استخدام عميل Groq الرسمي لضمان الموثوقية التامة وعدم حصول Timeout
+        # استخدام عميل Groq الرسمي لضمان الموثوقية التامة
         client = Groq(api_key=api_key)
         
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": LAITH_SYSTEM_PROMPT},
+                {"role": "system", "content": LAITH_SYSTEM_PROMPT + dynamic_context},
                 {"role": "user", "content": user_message}
             ],
             model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=0.35,
+            temperature=0.55,  # حرارة متوازنة ليكون الرد بشرياً وعفوياً
         )
         
         bot_reply = chat_completion.choices[0].message.content.strip()
