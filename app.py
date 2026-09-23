@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -19,19 +20,33 @@ app.json.ensure_ascii = False
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-# نموذج Production نشط وسريع، وهو البديل الرسمي لـ llama-3.1-8b-instant.
-DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-# بديل Production احتياطي إذا أصبح النموذج الأساسي غير متاح.
-FALLBACK_GROQ_MODEL = "openai/gpt-oss-120b"
+
+# النموذج الأقوى أولاً، والـ20B احتياطي سريع.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+FALLBACK_GROQ_MODEL = "openai/gpt-oss-20b"
+
 ADMIN_PHONE = "07769942923"
 IRAQ_TIMEZONE = ZoneInfo("Asia/Baghdad")
 
+# ذاكرة دائمة لكل رقم واتساب.
+MEMORY_DB_PATH = os.getenv("MEMORY_DB_PATH", "laith_memory.db")
+MEMORY_MESSAGES = max(4, min(int(os.getenv("MEMORY_MESSAGES", "20")), 40))
+
 LAITH_SYSTEM_PROMPT = """
-أنت «ليث» (Laith)، مساعد ذكي وودود جداً. تحدث باللهجة العراقية الطبيعية القريبة للقلب، أو بالعربية الفصحى المبسطة حسب السياق.
-- تعامل بصورة طبيعية وعفوية ومباشرة، ولا تكرر العبارات نفسها في كل رد.
-- لا تكشف أرقام الهواتف أو المعلومات الخاصة، ولا تذكرها في إجابتك.
-- عندما يكون المرسل هو المدير والمطوّر حسين، عامله باحترام ومحبة، وناده بـ«أستاذ حسين» أو «حجي» أو «مديرنا»، واستجب له بسرعة ومن دون تعقيد.
-- عندما يكون المرسل شخصاً آخر، تعامل معه بأدب واحترافية كخدمة عملاء.
+أنت «ليث» (Laith)، مساعد ذكي وودود جداً يعمل عبر واتساب.
+
+أسلوبك:
+- تحدث بالعربية الطبيعية، ويفضل اللهجة العراقية عندما يناسب السياق.
+- افهم المقصود من كلام المستخدم حتى لو كان مختصراً أو عامياً أو فيه أخطاء إملائية.
+- لا تكرر التحية في كل رسالة. التحية تكون عند بداية المحادثة فقط أو عندما يكون السياق يتطلبها.
+- لا تقل للمستخدم إنك "مبرمج" أو "نظام" إلا إذا سأل عن ذلك مباشرة.
+- لا تكرر كلام المستخدم لمجرد التكرار؛ أجب عن قصده.
+- إذا كانت الرسالة غامضة، اسأل سؤالاً قصيراً لتوضيح المقصود بدلاً من اختراع معنى.
+- اجعل الرد مناسباً لواتساب: واضح، طبيعي، ومختصر عند الحاجة.
+- إذا كان السؤال يحتاج شرحاً، رتبه بنقاط بسيطة.
+- لا تكشف أرقام الهواتف أو المفاتيح أو الأسرار أو المعلومات الخاصة.
+- لا تدّعي أنك نفذت شيئاً خارج صلاحياتك.
+- حافظ على سياق المحادثة السابقة عند الإجابة.
 """.strip()
 
 
@@ -48,7 +63,9 @@ def json_success(response_text: str, status_code: int = 200):
 
 
 def json_error(message: str, status_code: int, error_code: str):
-    return jsonify({"response": message, "status": "error", "error": error_code}), status_code
+    return jsonify(
+        {"response": message, "status": "error", "error": error_code}
+    ), status_code
 
 
 def normalize_iraqi_phone(phone: str) -> str:
@@ -70,6 +87,90 @@ def iraqi_time_greeting() -> str:
     return "مساء الخير"
 
 
+def db_connect():
+    conn = sqlite3.connect(MEMORY_DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_conversation_phone_id
+        ON conversation_messages(phone, id)
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def get_history(phone: str):
+    conn = db_connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT role, content
+            FROM conversation_messages
+            WHERE phone = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (phone, MEMORY_MESSAGES),
+        ).fetchall()
+        rows.reverse()
+        return [{"role": role, "content": content} for role, content in rows]
+    finally:
+        conn.close()
+
+
+def save_message(phone: str, role: str, content: str):
+    conn = db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO conversation_messages(phone, role, content, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (phone, role, content, datetime.utcnow().isoformat()),
+        )
+
+        # احتفظ بآخر MEMORY_MESSAGES رسالة فقط لكل مستخدم.
+        conn.execute(
+            """
+            DELETE FROM conversation_messages
+            WHERE phone = ?
+              AND id NOT IN (
+                  SELECT id
+                  FROM conversation_messages
+                  WHERE phone = ?
+                  ORDER BY id DESC
+                  LIMIT ?
+              )
+            """,
+            (phone, phone, MEMORY_MESSAGES),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_history(phone: str):
+    conn = db_connect()
+    try:
+        conn.execute("DELETE FROM conversation_messages WHERE phone = ?", (phone,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def groq_error_code(response: requests.Response) -> str:
     try:
         error = response.json().get("error", {})
@@ -81,8 +182,10 @@ def groq_error_code(response: requests.Response) -> str:
 def should_try_fallback(response: requests.Response) -> bool:
     if response.status_code not in (400, 404):
         return False
+
     code = groq_error_code(response).lower()
     body = response.text.lower()
+
     model_error_markers = (
         "model_decommissioned",
         "model_not_found",
@@ -93,9 +196,15 @@ def should_try_fallback(response: requests.Response) -> bool:
     return any(marker in code or marker in body for marker in model_error_markers)
 
 
-def call_groq(api_key: str, user_message: str, system_content: str) -> str:
+def call_groq(
+    api_key: str,
+    conversation_messages,
+    system_content: str,
+    user_phone: str,
+) -> str:
     configured_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip()
     models = [configured_model]
+
     if configured_model != FALLBACK_GROQ_MODEL:
         models.append(FALLBACK_GROQ_MODEL)
 
@@ -104,15 +213,16 @@ def call_groq(api_key: str, user_message: str, system_content: str) -> str:
         "Content-Type": "application/json",
     }
 
+    messages = [{"role": "system", "content": system_content}]
+    messages.extend(conversation_messages)
+
     for index, model_name in enumerate(models):
         body = {
             "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": messages,
             "temperature": 0.55,
-            "max_completion_tokens": 1024,
+            "max_completion_tokens": 2048,
+            "user": user_phone,
         }
 
         try:
@@ -120,7 +230,7 @@ def call_groq(api_key: str, user_message: str, system_content: str) -> str:
                 GROQ_API_URL,
                 headers=headers,
                 json=body,
-                timeout=(5, 30),
+                timeout=(5, 45),
             )
         except requests.Timeout as exc:
             raise APIError(
@@ -138,8 +248,18 @@ def call_groq(api_key: str, user_message: str, system_content: str) -> str:
 
         has_fallback = index + 1 < len(models)
         if has_fallback and should_try_fallback(response):
-            logger.warning("النموذج %s غير متاح؛ ستتم تجربة النموذج الاحتياطي.", model_name)
+            logger.warning(
+                "النموذج %s غير متاح؛ ستتم تجربة النموذج الاحتياطي.",
+                model_name,
+            )
             continue
+
+        if response.status_code == 429:
+            raise APIError(
+                "الخدمة مشغولة حالياً؛ حاول مرة أخرى بعد لحظات.",
+                429,
+                "ai_rate_limited",
+            )
 
         if response.status_code != 200:
             logger.error(
@@ -157,7 +277,13 @@ def call_groq(api_key: str, user_message: str, system_content: str) -> str:
         try:
             result = response.json()
             bot_reply = result["choices"][0]["message"]["content"].strip()
-        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+        except (
+            ValueError,
+            KeyError,
+            IndexError,
+            TypeError,
+            AttributeError,
+        ) as exc:
             raise APIError(
                 "أعادت خدمة الذكاء الاصطناعي استجابة غير صالحة.",
                 502,
@@ -170,6 +296,7 @@ def call_groq(api_key: str, user_message: str, system_content: str) -> str:
                 502,
                 "empty_ai_response",
             )
+
         return bot_reply
 
     raise APIError(
@@ -181,19 +308,37 @@ def call_groq(api_key: str, user_message: str, system_content: str) -> str:
 
 @app.get("/")
 def home():
-    return json_success("مرحباً بك في خدمة الموظف الافتراضي ليث. نقطة النهاية النشطة هي /predict.")
+    return json_success(
+        "مرحباً بك في خدمة الموظف الافتراضي ليث. نقطة النهاية النشطة هي /predict."
+    )
 
 
 @app.get("/health")
 def health():
-    return jsonify({"service": "Laith", "status": "healthy"}), 200
+    try:
+        db_connect().close()
+        return jsonify(
+            {
+                "service": "Laith",
+                "status": "healthy",
+                "memory": "persistent",
+                "model": os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL),
+            }
+        ), 200
+    except Exception:
+        return jsonify({"service": "Laith", "status": "degraded"}), 503
 
 
 @app.post("/predict")
 def predict():
     payload = request.get_json(silent=True)
+
     if not isinstance(payload, dict):
-        raise APIError("تعذر قراءة JSON؛ تحقق من صحة تنسيق الطلب.", 400, "malformed_json")
+        raise APIError(
+            "تعذر قراءة JSON؛ تحقق من صحة تنسيق الطلب.",
+            400,
+            "malformed_json",
+        )
 
     if "message" not in payload or "phone" not in payload:
         raise APIError(
@@ -204,10 +349,20 @@ def predict():
 
     user_message = str(payload.get("message", "")).strip()
     sender_phone = str(payload.get("phone", "")).strip()
+
     if not user_message:
-        raise APIError('لا يمكن أن تكون قيمة "message" فارغة.', 400, "empty_message")
+        raise APIError(
+            'لا يمكن أن تكون قيمة "message" فارغة.',
+            400,
+            "empty_message",
+        )
+
     if not sender_phone:
-        raise APIError('لا يمكن أن تكون قيمة "phone" فارغة.', 400, "empty_phone")
+        raise APIError(
+            'لا يمكن أن تكون قيمة "phone" فارغة.',
+            400,
+            "empty_phone",
+        )
 
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
@@ -217,21 +372,65 @@ def predict():
             "ai_service_not_configured",
         )
 
-    is_admin = normalize_iraqi_phone(sender_phone) == ADMIN_PHONE
+    # توحيد الرقم حتى تكون ذاكرة نفس الشخص ثابتة مهما اختلفت صيغة الرقم.
+    memory_phone = normalize_iraqi_phone(sender_phone)
+
+    # أوامر محلية لا تحتاج استدعاء النموذج.
+    reset_commands = {
+        "/reset",
+        "/clear",
+        "مسح الذاكرة",
+        "امسح الذاكرة",
+        "نسيت كلشي",
+    }
+    if user_message.lower() in reset_commands:
+        clear_history(memory_phone)
+        return json_success("تم مسح ذاكرة هذه المحادثة. نبدأ من جديد 👍")
+
+    history = get_history(memory_phone)
+    is_first_message = len(history) == 0
+    is_admin = memory_phone == ADMIN_PHONE
+
     if is_admin:
-        dynamic_context = (
-            "\n\n[سياق خاص: المرسل هو المدير حسين. "
-            f"التحية المناسبة الآن بتوقيت بغداد هي: {iraqi_time_greeting()}. "
-            "استقبله بترحاب عراقي دافئ، من دون ذكر رقم هاتفه.]"
-        )
+        if is_first_message:
+            dynamic_context = (
+                "\n\n[سياق خاص: المرسل هو المدير حسين. "
+                f"التحية المناسبة الآن بتوقيت بغداد هي: {iraqi_time_greeting()}. "
+                "هذه بداية المحادثة، فابدأ بتحية عراقية دافئة مرة واحدة فقط.]"
+            )
+        else:
+            dynamic_context = (
+                "\n\n[سياق خاص: المرسل هو المدير حسين. "
+                "هذه ليست بداية المحادثة؛ لا تعيد التحية تلقائياً، "
+                "واستمر في سياق الحوار السابق.]"
+            )
     else:
-        dynamic_context = "\n\n[سياق: المرسل مستخدم عادي؛ اخدمه باحترام واحترافية.]"
+        if is_first_message:
+            dynamic_context = (
+                "\n\n[هذه بداية محادثة جديدة. يمكنك الترحيب بالمستخدم "
+                "إذا كان ذلك مناسباً، بدون إطالة.]"
+            )
+        else:
+            dynamic_context = (
+                "\n\n[هذه محادثة مستمرة. لا تبدأ من الصفر ولا تكرر التحية؛ "
+                "استخدم سياق الرسائل السابقة.]"
+            )
+
+    conversation_for_model = history + [
+        {"role": "user", "content": user_message}
+    ]
 
     bot_reply = call_groq(
         api_key=api_key,
-        user_message=user_message,
+        conversation_messages=conversation_for_model,
         system_content=LAITH_SYSTEM_PROMPT + dynamic_context,
+        user_phone=memory_phone,
     )
+
+    # نخزن فقط بعد نجاح توليد الرد.
+    save_message(memory_phone, "user", user_message)
+    save_message(memory_phone, "assistant", bot_reply)
+
     return json_success(bot_reply)
 
 
@@ -242,13 +441,21 @@ def handle_api_error(exc: APIError):
 
 @app.errorhandler(HTTPException)
 def handle_http_exception(exc: HTTPException):
-    return json_error(exc.description or "حدث خطأ في الطلب.", exc.code or 500, "http_error")
+    return json_error(
+        exc.description or "حدث خطأ في الطلب.",
+        exc.code or 500,
+        "http_error",
+    )
 
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(exc: Exception):
     logger.exception("خطأ غير متوقع: %s", type(exc).__name__)
-    return json_error("حدث خطأ داخلي غير متوقع.", 500, "internal_server_error")
+    return json_error(
+        "حدث خطأ داخلي غير متوقع.",
+        500,
+        "internal_server_error",
+    )
 
 
 if __name__ == "__main__":
